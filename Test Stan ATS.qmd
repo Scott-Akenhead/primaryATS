@@ -1,0 +1,57 @@
+---
+title: "Test Stan for ATS"
+author: "Scott A. Akenhead"
+date: " `r Sys.Date()` "
+format: pdf
+editor: visual
+execute: 
+  cache: true
+---
+
+```{r setup}
+library (rstan)
+options(mc.cores = parallel::detectCores()) 
+rstan_options(auto_write = TRUE)
+
+```
+
+## First Test
+
+execute simplest model, as supplied by Quarto \>File \> New File \> Stan File
+
+```{r}
+print(getwd())
+file.exists('Stan ATS.stan') # TRUE
+
+dat1 = list(
+    N= 10, 
+    y=rnorm(10,5,1)
+)
+
+fit1 <- stan(
+    file = "Stan ATS.stan", # program, code
+    data = dat1,            # data conforming to description in "Stan ATS.stan"
+    chains = 4,             # number of Markov chains
+    cores = 4,              # number of cores (one per chain)
+    warmup = 1000,          # number of warmup iterations per chain
+    iter = 2000             # total number of iterations per chain
+)
+print(summary(fit1)$summary[1:2, -2], digits=3) # drop se_mean, drop lp__ 
+```
+
+## Second Test
+
+Andrew Gelman's schools example from [RStan-Getting-Started](https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started "one of them interwebs."){style="color: blue;"} saved as file: *schools.stan*
+
+```{r}
+schools_dat <- list(
+    J = 8, 
+    y = c(28,  8, -3,  7, -1,  1, 18, 12),
+    sigma = c(15, 10, 16, 11,  9, 11, 10, 18)
+)
+fit2 <- stan(file = 'schools.stan', data = schools_dat)
+print(summary(fit2)$summary[ ,-2], digits=3) # drop se_mean
+plot(fit2)
+```
+
+\

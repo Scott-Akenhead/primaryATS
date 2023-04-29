@@ -1,0 +1,181 @@
+---
+title: "Spawner Parr Regression in Stan"
+author: "Scott A. Akenhead"
+date: " `r Sys.Date()` "
+format: pdf
+editor: visual
+execute: 
+  cache: true
+---
+
+```{r setup}
+library (rstan); library(knitr)
+options(mc.cores = parallel::detectCores()) 
+rstan_options(auto_write = TRUE)
+
+```
+
+# ATS SURVEY DATASET
+
+## Osoyoos Lake 
+
+three datasets:
+
+1.  Spawners as PC-1 from AUC and PLD[^1]
+
+2.  Parr_wcon as weighted mean of parr surveys during summer.
+
+3.  Parr_reg as estimates from nonlinear, weighted, survival model.
+
+[^1]: AUC: area under curve, the trapezoid from linear interpolation between observations of spawner abundance; PLD: peak live plus dead is the maximum count of spawners, alive and dead.
+
+Spawners as a principle component is a normalized variable (mean 0, stdev 1) with values ranging -1.44, 3.86. To eliminate negative spawners, this is adjusted to the mean 54,522 and stdev 53698 of AUC 2001-2020.
+
+In passing the mean(stdev) of PLD is 31,002(26,623). Assuming AUC trapezoids approximate a Gaussian distribution with maximum estimated by PLD, then the stdev of spawner abundance is 54,522/ 31,002
+
+Match the spawner years (2001 to 2020) to the corresponding parr identified by smolt year: spawner year + 2.
+
+```{r}
+print(getwd())
+
+file.exists('Spawner Parr.stan') 
+file.exists('data/SpawnersPC.Rdata')
+file.exists('data/parr conventional weighted.RData') 
+file.exists('data/parr regression est and stderr.RData') 
+
+spawners <- readRDS('data/SpawnersPC.Rdata')
+dim(spawners); colnames(spawners); range(spawners$Year)
+parrWC <- readRDS('data/parr conventional weighted.RData') 
+dim(parrWC); colnames(parrWC); range(parrWC$Smolt_Year)
+parrReg <- readRDS('data/parr regression est and stderr.RData') 
+dim(parrReg); colnames(parrReg); range(parrReg$Smolt_Year)
+
+# fix spawners
+spawners = spawners[ order(spawners$Year), ]
+colnames(spawners) <- c('Brood_Year','Spawners_PC1','Spawners_PC2')
+
+# match spawners Brood_Year 2001:2020 to Smolt_Year 1998:2021
+#     tricky Smolt Year 2002 is data from 2001 and early 2002, so 
+#     data for parr in 2001 is related to spawners year 2000
+#     thus brood_year is  smolt year -1
+# ParrWC is NA for smolt years 2020,2021; broods 2018, 2019.
+a <- parrWC$Smolt_Year  
+j = (a >= 2001) & (a <= 2020)
+parr1 = parrWC[j,2:3 ] *1e-6 # Parr_m,  Parr_sd
+parr1$Brood_Year <- a[j]
+
+a <- parrReg$Smolt_Year  
+j = (a >= 2001) & (a <= 2020)
+parr2  = parrReg[j,2:3 ]   # estimate, stderr
+parr2$Brood_Year <- a[j]
+
+spawners1 = spawners[, 1:2] # Year, PC1 
+kable(cbind(spawners1, parr1, parr2), digits=3, row.names = FALSE)
+```
+
+### Check Plots
+
+```{r}
+par(tcl=0.2)
+x=parr2$estimate
+y=parr1$Parr_m
+r1 <- lm(y~x); summary(r1)
+plot(x,y, pch=20, 
+     xlab= "Parr: Mortality Regression", ylab="Parr, Weighted Mean")
+  text(x,y, labels=parr1$Brood_Year,cex=.5,pos=4, offset=0.1)
+abline(r1)
+```
+
+```{r}
+par(tcl=0.2)
+x=spawners1$Spawners_PC1
+y=parr1$Parr_m
+r2 <- lm(y~x); summary(r2)
+plot(x,y, pch=20, 
+     xlab= "Spawners, PC-1", ylab="Parr: Weighted Mean")
+  text(x,y, labels=spawners1$Brood_Year,cex=.5,pos=4, offset=0.1)
+abline(r2)
+# setup for Stan. eliminate NAs. 
+dat1 = list(
+    n_years  = 18, 
+    spawner = x[2:19],
+    parr     = y[2:19]
+)
+```
+
+```{r}
+x=spawners1$Spawners_PC1
+y=parr2$estimate  # parr mortality regression
+r3 <- lm(y~x); summary(r3)
+par(tcl=0.2)
+plot(x,y, pch=20,cex=.5, 
+     xlab= "Parr: Mortality Regression", ylab="Parr: Weighted Mean")
+text(x,y, labels=spawners1$Brood_Year,cex=.5,pos=4, offset=0.1)
+abline(r3)
+# setup for Stan
+dat2= list(
+     n_years = 20, 
+    spawner = x,
+    parr     = y
+)
+```
+
+## Flow Indicators
+
+Four files to summarize flows by Osoyoos Lake sockeye life stages, in intervals defined by FWMT.
+
+```{r}
+#| label: read_flows
+# list.files('./data')
+bad_days <- readRDS("bad_days_Oliver_2022-10-07.RData")     
+flowMean <- readRDS("flowMean_Oliver_2022-10-07.RData")  
+scour    <- readRDS("scour_Oliver 2022-10-07.RData")
+sum_flow <- readRDS("sum_flow_Oliver_2022-10-07.RData")
+```
+
+# Parr/Spawner Time Series
+
+The ratio of parr/spawners will be approximately lognormal, so transformed as log (P/S). Spawner as a principle component, thus normalized, has negative values, the range is `r range(a)`. Re-locate spawners by 2x lowest. Alternatively, locate and scale by mean and sd of AUC or PLD.
+
+```{r}
+x=spawners1$Brood_Year
+a <- spawners1$Spawners_PC1
+a = a + 2*abs(min(a)) # 1.22 to 6.77 
+y= log(parr2$estimate / a)  # parr mortality regression
+ms= mean(y)+(c(-1,0,1)*sd(y)) # mean and plus/minus one std dev.
+par(tcl=0.2)
+plot(x,y, pch=20,type='o', 
+     xlab= "Brood Year", ylab="log(Parr/Smolts)" )
+abline(h=ms,col='blue')
+```
+
+# Sampling
+
+```{r}
+fit1 <- stan(
+    file = "Spawner Parr.stan", # program, code
+    data = dat1,            # data conforming to description in "Stan ATS.stan"
+    chains = 4,             # number of Markov chains
+    cores = 4,              # number of cores (one per chain)
+    warmup = 1000,          # number of warmup iterations per chain
+    iter = 2000             # total number of iterations per chain
+) 
+print(summary(fit1)$summary[1:3, -2], digits=3) # drop se_mean, drop lp__ 
+plot(fit1)
+```
+
+```{r}
+
+fit2 <- stan(
+    file = "Spawner Parr.stan", # program, code
+    data = dat2,            # data conforming to description in "Stan ATS.stan"
+    chains = 4,             # number of Markov chains
+    cores = 4,              # number of cores (one per chain)
+    warmup = 1000,          # number of warmup iterations per chain
+    iter = 2000             # total number of iterations per chain
+)
+print(summary(fit2)$summary[1:3, -2], digits=3) # drop se_mean, drop lp__ 
+plot(fit2)
+```
+
+\

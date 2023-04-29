@@ -1,0 +1,179 @@
+---
+title: ATS Mortality 2
+subtitle: Analysis of ATS estimates with declining mortality rate
+author: "Scott A. Akenhead"
+date: " `r Sys.Date()` "
+format: pdf
+editor: visual
+execute: 
+  cache: true
+---
+
+```{r setup}
+#| include: false
+#| echo: false
+library (rstan); library(knitr); library(ggplot2);library(magrittr)
+options(mc.cores = parallel::detectCores()) 
+rstan_options(auto_write = TRUE)
+
+```
+
+# This Is A Continuance
+
+see ATS_mortality_2.qmd re data transform and set-up for Stan model.
+
+This report advances Model 1 to Model 2. The difference is
+
+$$
+\frac {dN/dt}{N}= m_0 e^{m_1t}
+$$ {#eq-m_vary}
+
+such that the per capita mortality rate for parr and pre-smolts changes exponentially with time. This model predicts abundance at survey date across the lake life of a generation (cohort) of sockeye parr and pre-smolts. The prediction requires integration of @eq-m_vary and this is performed numerically, resulting in curve that represents the survival from one date to a subsequent date. This allows extrapolation of abundance estimated at a standard day (day zero, autumn equinox) to observation dates.
+
+The parameter of the mortality model are the same for every parr generation. The integration is implemented by calculating the mortality rate for each day across the range of all observation days, then converting that to survival, then extracting the survival from day zero to each observation date. The final step is applying each years estimate of abundance (at day zero) to predict abundance at the observation days in that year.
+
+### Plot: Exponential Decline in Mortality
+
+```{r}
+
+n=340; all_days=-151:188
+m_0 = 0.00244 ; m_1 =0.00572
+surv = exp(-m_0 * exp(-m_1 * all_days)) ;
+for(j in 2:n) surv[j] = surv[j] * surv[j-1];
+surv=surv/surv[151]
+  par(tcl = 0.2, las = 1, cex.axis = 1.2, cex.lab = 1.5,
+      pch = 20, mgp = c(2.5, 0.2, 0), mai=c(1.,1.,0.75,0.5) );
+plot(surv~all_days, type='l', yaxs="i", ylim=c(0,2),
+     xlab='Days from Fall Equinox', ylab="Survival"); axis(3,labels=F);axis(4,labels=F);
+abline(h=1, v=c(-91,0,91,182),lty="dotted", col='blue')
+```
+
+\
+
+```{r}
+a2 <- readRDS(file='data/OSO ATS setup for Stan.RData')
+a <- range(a2$Day)
+n_surv = dim(a2)[1] # rows
+ndays= 1+(a[2]-a[1]) # 1+(188-(-151)) = 340
+# which day, in the range of all days, is each observation.
+# this is used to index the survival to and from day zero
+day_index=1+(a2$Day-a[1]) # length 116, 
+  # range 1 to 340; 97,139,194,
+all_days <- c(-151:188)  # length 340
+n_obs <- as.vector( by( a2$Abundance, INDICES= a2$Smolt_Year, length)) # count obs in each year. length 24
+# 3 3 3 2 3 4 3 3 5 5 5 7 7 9 6 6 7 7 9 4 6 3 3 3. 
+
+```
+
+Data is set up corresponding to data block in ATS\_ model_2.stan:
+
+> data {\
+> int\<lower=0\> N; // n observations, 116\
+> int\<lower=0\> n_years; // n years, 24\
+> int\<lower=0\> n_obs\[n_years\]; // n obs each year\
+> vector \[N\] day ; // obs days, -151 to 188\
+> vector\<lower=0\> \[N\] y ; // abundance, ATS obs\
+> vector\<lower=0\> \[N\] prec; // regression weights\
+> // for function surv()\
+> vector \[340\] all_days ; // sequence -151 to 188\
+> int day_index\[N\] ; // index obs days in all_days\
+> }
+
+```{r data-setup}
+# basic data is vector of 116 samples for 24 years 1998-2021.
+# data as 3 vectors: day, abundance, precision 
+# data for a year is parsed by a vector for number surveys each year; max 9. 
+
+# see ATS_mortality_2.stan 
+dat2 <- list(
+  N =116,                # n obs
+  n_years  = 24,         # n of smolt years
+  n_obs    = n_obs,      # n obs in  each smolt year; 24
+  day      = a2$Day,     # day of obs; 116, range: -151 188
+  y        = a2$Abundance,
+  prec     = a2$Weight,  # regression weight
+  all_days =all_days,    # -151:188, 340
+  day_index = day_index  # obs day in all_days; 116
+)
+
+```
+
+### Sampling
+
+see ATS_mortality_1.qmd\
+
+```{r model2}
+
+fit2 <- stan(
+    file = "ATS_mortality_2.stan", # model in Stan code
+    data = dat2,            # data as described in model
+    verbose = FALSE,         # debugging
+    chains = 4,             # number of Markov chains
+    control=list(max_treedepth=20),
+    cores = 4,              # number of cores (one per chain)
+    warmup = 1000,          # number of warmup iterations per chain
+    iter = 5000             # total samples per chain
+) 
+print(summary(fit2)$summary[ ,-2], digits=3) # drop se_mean
+
+```
+
+### Plot Fitted Parameters
+
+```{r}
+plot(fit2,pars=c("m_0","m_1","m0","m1","sigma","lp__"), include=FALSE, ci_level=0.5)+theme_bw()+
+  labs(y='Smolt Year', x='Abundance at Fall Equinox',title = 'Model 2, Declining Mortality', subtitle=' mortality: 0.24%/day, decline 0.57%/day')
+#pairs(fit2, pars = c("m_0", "sigma", "lp__"), las = 1)
+
+```
+
+## time series
+
+```{r conv}
+# just grap median, 5 and 95 percentiles, for just the abundance predictions.
+a <- as.data.frame(summary(fit2)$summary[3:26, c(4,6,8)] )
+colnames(a) <- c('lower95','median','upper95')
+a$smolt_year = 1998:2021
+ggplot(a, aes(smolt_year, median)) + theme_bw()+
+    geom_line(linewidth=0.25) + geom_point(size=1) + 
+    geom_errorbar(aes(ymin = lower95, ymax = upper95), width = 0.4) +
+    labs(x="Smolt Year", y="Abundance with 95% interval") 
+```
+
+## observed and predicted
+
+```{r obs_pred}
+# first, we need the prediction model. Re-use previous data setup
+    m_0=0.00244; m_1=0.00572; ndays=340
+    surv= exp(-m_0 * exp(-m_1 *(1:ndays)))  # 340
+    surv=cumprod(surv)
+    surv= surv/surv[155]
+    surv=surv[day_index]
+    pred=numeric(n_surv)
+    n1=1
+    for (j in 1:24){
+        n2=n1+n_obs[j] -1
+        pred[n1:n2] <- a$median[j]*surv[n1:n2]
+        n1=n2+1
+    }
+a3 = a2
+a3$Predicted =pred
+a3$Residual= a3$Abundance-pred
+
+```
+
+```{r}
+ggplot(a3, aes(Abundance, Predicted))+theme_bw()+ 
+    geom_point() + geom_abline(intercept =0,slope=1)
+```
+
+```{r}
+ggplot(a3, aes(Weight,Residual)) + theme_bw() +
+    geom_point() + geom_hline(yintercept = 0)
+```
+
+```{r}
+a3$weightedPrediction = a3$Abundance - a3$Residual * a3$Weight
+ggplot(a3, aes(Abundance, weightedPrediction)) + theme_bw() +
+    geom_point() + geom_abline() + labs(y='Weighted Prediction')
+```

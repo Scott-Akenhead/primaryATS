@@ -1,0 +1,193 @@
+---
+title: "Parr and Presmolt Abundance and Mortality Rate Estimation"
+subtitle: "Analysis of ATS survey estimates using all years combined'
+author: "Scott A. Akenhead"
+date: " `r Sys.Date()` "
+format: pdf
+editor: visual
+execute: 
+  cache: true
+---
+
+```{r setup}
+#| include: false
+#| echo: false
+library (rstan); library(knitr); library(ggplot2);library(magrittr)
+options(mc.cores = parallel::detectCores()) 
+rstan_options(auto_write = TRUE)
+
+```
+
+# Datasets
+
+## Osoyoos Lake Parr and Presmolts
+
+Parr estimates are Summer, Fall, and Winter **acoustic and trawl surveys** (ATS) of juvenile *O. nerka* in Osoyoos Lake, most of which will migrate the following Spring as age 1.0 smolts.
+
+## Source
+
+Data, metadata, and references to background and methods are in [CNAT_nuOkanagan_Juveniles 22.08.17.xlsx](https://docs.google.com/spreadsheets/d/161I9H9kvuyWE90czqNbnxaZeukN60D_g/edit?usp=sharing&ouid=112171968912503831774&rtpof=true&sd=true "in the OK SOS Google Workspace") last updated 2022-10-05 by Howard Stiff.
+
+The .xlsx file was copied to a Sheet: [copy of CNAT_nuOkanagan_Juveniles 22.08.17](https://docs.google.com/spreadsheets/d/18rpVCnsTnFI2z51bb1_SMhI8Y2pc_1filwfotN9kDDU/edit?usp=sharing "in OK SOX workspace") Only the tab **Juvenile Abundance** was retained. Result of formulae in that tab were converted to *values only.* The information about which dates (rows) were averaged for parr abundance estimates was coded as an additional column *Life_Stage* with values: *Parr, Smolt, omit,* and *blank.* That tab was copied to a tab **sort_shorten** where rows with calculated results were deleted and the data sorted by *Life_Stage*. The result is a sequence of 44 rows for parr abundance estimates, 56 pre-smolt estimates, 13 observations unused for parr and pre-smolt estimates (typically September, see comments in .xlxs), and 3 values marked unusable. These three were deleted, as was a single observation for *Smolt_Year* 2022 without dates.
+
+Sample dates in Excel format were converted to display as yyyy-mm-dd (ISO 6401). The Sheets function *split text into columns* then resulted in usable date information: *Sample_Year, Sample_Month, Sample_Day.*\
+
+## ATS Data
+
+The ATS survey data is summarized as:
+
+-   **Smolt year**. The year that smolts age 1.0 will emigrate. Data is available for smolt years 1998 to 2021.
+
+-   **Day**. The ATS survey observation day. Based on range of available ATS dates, this extends from solar *day* 123 (late April, solar *day* 0 is winter solstice, Julian calendar December 21) until day 462 (late March), a span of 340 days. Note *day* will exceed 365 or 366.
+
+    -   Surveys are on valid when smolts are properly observed by ATS survey methods: ***after*** they are distributed thoughout the natal lake, out of the littoral habitat of the preceding fry life stage, but ***before*** schooling in advance of emigrating to marine habitats.
+
+    -   In the analysis following, *days* are centered to a standard day. Fall equinox (*day* 274) is taken as Day Zero, close to the median day of Osoyoos Lake surveys(*day* 266). This is arbitrary, one could use summer solstice, median date of smolt emigration,. Thus *day* ranges from -151 to 188.
+
+-   **Abundance.** Estimates of sockeye parr and presmolts, expressed in millions, are counts from acoustic transects. Age 0 parr and presmolts predominate, approximately 95%. The proportion of age 1 fish, spending a second summer in the lake and larger than age 0 fish, is determined from the age composition of trawl samples taken during the acoustic survey, but there is evidence that age 1 fish are not proportionately or consistently sampled (biased, imprecise, unreliable). Thus analysis proceeds on the basis of total counts. Note that not all age 0 fish will metamorphose to presmolts and emigrate as smolts, about 5% will remain for another growing season.
+
+-   **Precision**. At hand are 95% confidence limits, ranging 0.05 to 50, assumed to represent the variability in acoustic counts between survey transects. These transects are connected diagonals (zig-zags) throughout the lake: 7 in WEN, 12 in OSO. If the fish distribution is patchy during a survey, the 90%CL will be higher. Assuming the 95%CL is proportional to standard deviation, and that precision as the inverse of variance, we calculated precision as $(95\%CL)^{-2}$.
+
+    -   Because the objective of regression weights, in this case, is to down-weight unreliable data, rather than treat some data points as highly (spuriously) precise, weights above the median were all set to the median weight. Subsequently, weights were scaled by dividing by that median weight, resulting in weights greater than zero and not greater than, but frequently, 1.
+
+```{r local_functions}
+#| include: false
+DOJY <- function(mon,day){  # vectorized version
+    # Day of Julian Year
+    # mon as 1 to 12 or "Jan" to "Dec" or "January" to "December"
+    # add 10 for solar day (Dec 21 = DOJY 355). add 1 if leap year and DOJY > 58
+    prev_end_doy = c(0,31,59,90,120,151,181,212,243,273,304,334)
+    # first the easy one
+    if(is.numeric(mon))return(prev_end_doy[mon]+day) # works for vector arguments
+    # then long or shor nomth names get convereted to a number.
+    n = length(mon)
+    mon_n = integer(n) # number for month TBD
+    month_char=month.abb  # short names from  R
+    if(max(nchar(mon)) > 3)  month_char=month.name #l long names from R 
+    for(j in 1:n) mon_n[j] = which(month_char  %in% mon[j])
+    return(prev_end_doy[mon_n]+day)
+}
+#examples 
+#obs_day= c(26,  4, 13, 28, 18)
+#DOJY1(mon=c(5,  8,  9, 11,  1), obs_day) # 146 216 256 332  18
+#DOJY1(mon=c('May','Aug','Sep','Nov','Jan'),obs_day)
+#DOJY1(mon=c('May','August','September','November','January'),obs_day)
+```
+
+```{r}
+a1 <- readRDS('data/parr2022-10-07.Rdata') 
+a1 <- a1[-117, ]      # delete incomplete data for 2020
+# solar day zero = winter solstice, Julian day 355, December 21.
+solar <- with(a1, DOJY(Sample_Month, Sample_Day)) + 10 # ignore leap year
+j <- a1$Sample_Year == a1$Smolt_Year # Jan-March presmolts same gen as parr.
+solar[j] <- solar[j]+365 # range 123 to 462. median 265.5 
+a2 <- as.data.frame(a1[, c(2,7)])    # save only Smolt_Year, Abundance.
+a2$Abundance = a2$Abundance * 1e-6 # estimate as millions
+  # day 0 is fall equinox. (3/4)*365.25.=273.9
+a2$Day <- solar - 274 # range -151 to 188 
+w <- a1$CL_95 ^(-2)   # precision is 1/variance. range: 3.3 to 2500
+m <- median(w)        # 51.  where 95_CL = 14% 
+w[w >= m] <- m        # best half of weights have same (good) precision 
+a2$Weight <- w/m      # range 0.065 to 1.00
+saveRDS(a2,file='data/OSO ATS setup for Stan.RData')
+rm(a1,j,w,m, solar) # clean up
+kable(a2, digits=c(0,3,3,3),caption="Osoyoos Lake ATS data. Abundance is juvenile _O. nerka_ in millions. Day is date of observation centered at fall equinox. Smolt year is year of emigration, identifying parr and pre-smolts within a generation. Weight is 1/variance of a survey, capped at median to avoid spurious precision.")
+```
+
+# Models
+
+The basic idea:
+
+1.  ATS survey estimates are relatively imprecise, more so than suggested by 95% confidence limits (CL95) with a median of 14%. The frequency of surveys estimating more abundance than a previous survey, despite mortality, evidences more imprecise samples.
+
+2.  Given imprecise samples and mortality, using the mean of 1 to 3 samples to estimate summer parr and winter pre-smolts will yield biased and imprecise estimates.
+
+    1.  Improvement is obtained by using all of the information about abundance of parr and presmolts throughout a generation (identified as smolt year) and recognizing that the abundance in a generation necessarily declines throughout lake life.
+
+3.  The mortality rate is likely similar among generations. Initial models have a pattern in a year that is the same every year.
+
+4.  Via added factors, the mortality rate can change within a year. For instance fish length: higher if smaller fish, lower if larger fish.
+
+    1.  Annual and within-year effects might be in addition to a mortality pattern that is the same across years.
+
+The resulting objective is to estimate abundance at a standard day for each generation (each year). The standard day (**day zero**) was arbitrarily assigned as fall equinox, close to the median date of all surveys. The abundance estimate for day zero and the mortality model predict abundance at the date of each survey. The model is fitted by, essentially, minimized squared deviations from predicted and observed (log likelihood), but with regression weights derived from survey precision as indicated by the reported 95CL.
+
+We proceeded with a constant mortality rate (model 1), then a declining mortality (model 2), and then consideration of habitat indices: flow, poison, water management regime. Further work should consider fish size, possibly fish condition, as an indication of mortality rate.
+
+## Model 1. Abundance and Constant Mortality
+
+This model is the simplest possible, considering only $m$, a constant per capita rate of loss:
+
+$$
+\frac{dN/dt}{N}=m 
+$$
+
+The integral is well known:
+
+$$
+N_t = N_0 e^{mt}
+$$
+
+The model estimates $m$ for all years, and $N_0$ for each year 1998 to 2021, at $t=0$ , to predict $N_t$ at survey days in that year; 24 abundances and 1 mortality rate from 116 surveys. The model is *ATS_mortality_1.stan*.
+
+Data is set up corresponding to the Stan model:
+
+> data {\
+> int\<lower=0\> N; // number observations, 116\
+> int\<lower=0\> n_years; // number of smolt years\
+> int\<lower=0\> n_obs\[n_years\]; // number observation each year\
+> vector\<lower=0\> \[n_years\] day ; // date of obs, -151 to 188\
+> vector\<lower=0\> \[n_years\] y ; //ATS estimate abundance\
+> vector\<lower=0\> \[n_years\] prec; // 0 \> regression_weight \<=1\
+> }
+
+```{r data-setup}
+# see ATS_mortality_1.stan 
+# basic data is 3 vectors of 116 observations
+# 24 years 1998-2021. n_obs is number obs each year varies, max 9. 
+n_obs <- as.vector( by( a2$Abundance, INDICES= a2$Smolt_Year, length))
+# 3 3 3 2 3 4 3 3 5 5 5 7 7 9 6 6 7 7 9 4 6 3 3 3. length is 24
+dat1 <- list(
+  N =116,
+  n_years = 24,    # number of smolt years
+  n_obs   = n_obs, # number obs each smolt year
+  day  = a2$Day,   # 116 of day of observation: -151 to 188
+  y    = a2$Abundance,
+  prec = a2$Weight
+)
+
+```
+
+### Sampling
+
+The probability density distribution of the parameters space, given the model and the data, is computed as the log-likelihood of deviations of predicteds from observed, assuming Gaussian distribution. Essentially sum of squared deviations: $\sum (y-\hat{y})^2$.
+
+Additionally, the precision of ATS surveys is applied as a regression weight: good surveys count fully $(weight =1)$ , poor samples make a smaller contribution to the sum $(0 < weight \leq 1)$.
+
+The log-likelihood is accumulated with the Stan statement
+
+> target += w \* normal_lpdf(y \| y_hat, sigma);\
+
+```{r model1}
+fit1 <- stan(
+  file = "ATS_mortality_1.stan", # model in Stan code
+  data = dat1,            # data as described in model
+  chains = 4,             # number of Markov chains
+  control=list(max_treedepth=20),
+  cores  = 4,              # number of cores (one per chain)
+  warmup = 5000,          # number of warmup iterations per chain
+  iter   = 15000            # total number of iterations per chain
+) 
+print(summary(fit1)$summary[-27,-2], digits=3) # drop se_mean, drop lp__ 
+
+```
+
+### Plot Fitted Parameters
+
+```{r}
+plot(fit1,pars=c("m_0","sigma","lp__"), include=FALSE, ci_level=0.5)+theme_bw()+
+    labs(y='Year', x='Abundance at Fall Equinox',
+         title = 'Model 1, Invariate Mortality')
+#pairs(fit1, pars = c("m_0", "sigma", "lp__"), las = 1)
+
+```
